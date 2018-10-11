@@ -5,12 +5,16 @@ var bodyParser = require('body-parser');
 var Bluebird = require('bluebird');
 var request = Bluebird.promisify(require('request'));
 var tools = require('auth0-extension-tools');
+var cookieParser =  require( 'cookie-parser');
+   var crypto = require('crypto')
+        , shasum = crypto.createHash('sha1');
+
 
 var app = Express();
 app.use(bodyParser.urlencoded({
     extended: false
 }));
-
+app.use(cookieParser());
 function hereDoc(f) {
     return f.toString().
     replace(/^[^\/]+\/\*!?/, '').
@@ -20,13 +24,21 @@ function hereDoc(f) {
 app.get('/', function(req, res) {
     var token = req.query.token;
     var state = req.query.state;
-
+    
     jwt.verify(token, new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), function(err, decoded) {
         if (err) {
             res.end('Error with token: ' + JSON.stringify(err) + '\n Please login again.');
             return;
         }
-
+        console.log("decoded jti", decoded.jti);
+        var jti = decoded.jti;
+        var key = getSha1Hash(decoded.sub.split('|')[1]);
+        console.log(req.cookies[key]);
+        if (req.cookies[key] && isCookieStillGood(req.cookies[key], req, decoded)) {
+                decoded.status = "ok";
+                redirectBack(res, req.webtaskContext, decoded, decoded.status, req.query.state);
+                return;
+            }
         if (decoded.email_identity === null) {
             getUserById(req.webtaskContext, decoded.sub, function(err, user) {
                 if (err) {
@@ -54,6 +66,7 @@ app.get('/', function(req, res) {
                             });
                             var newTokenPayload = {};
                             newTokenPayload.email_identity = email_connections[0];
+                            newTokenPayload.jti = jti;
                             var newToken = jwt.sign(
                                 newTokenPayload,
                                 new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), {
@@ -78,7 +91,8 @@ app.get('/', function(req, res) {
                             subject: decoded.sub,
                             expiresIn: 600,
                             audience: decoded.aud,
-                            issuer: 'urn:auth0:email:mfa'
+                            issuer: 'urn:auth0:email:mfa',
+                            jti: jti
                         });
                     console.log(newToken);
                     decoded.token = newToken;
@@ -95,9 +109,20 @@ app.get('/', function(req, res) {
     });
 });
 
+
+app.get('/continue', (req, res) => {
+    jwt.verify(req.query.token, new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), (err, decoded) => {
+        if (err) sendToErrorPage(req, res, err);
+        redirectBack(res, req.webtaskContext, decoded, decoded.status, req.query.state);
+        
+    });
+});
+
+
 app.post('/', function(req, res) {
     var token = req.body.token;
     var state = req.body.state;
+    
     console.log(req.body);
     jwt.verify(token, new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), function(err, decoded) {
         if (err) {
@@ -114,8 +139,9 @@ app.post('/', function(req, res) {
                 verification_code: req.body.code
             }
         }).then(function(response) {
-            console.log("I am here");
-            redirectBack(res, req.webtaskContext, decoded, response[0].statusCode === 200, state);
+            console.log("I am here", response.statusCode);
+            redirectSetCookie(res,req.webtaskContext, decoded, response.statusCode === 200, state );
+            //redirectBack(res, req.webtaskContext, decoded, response[0].statusCode === 200, state);
         }).catch(function(e) {
                         console.log(e);
 
@@ -128,21 +154,45 @@ app.post('/', function(req, res) {
 function redirectBack(res, webtaskContext, decoded, success, state) {
   console.log("ha ha");
     var token = jwt.sign({
-            status: success ? 'ok' : 'fail'
+            status: success ,
+            jti: decoded.jti
         },
         new Buffer(webtaskContext.secrets.token_secret, 'base64'), {
             subject: decoded.sub,
             expiresIn: 60,
             audience: decoded.aud,
             issuer: 'urn:auth0:email:mfa'
+            
         });
-  console.log("ha ha 1");
+  console.log("in redirect back", decoded.jti);
     res.writeHead(301, {
         Location: 'https://' + webtaskContext.secrets.auth0_domain + '/continue' + '?id_token=' + token + '&state=' + state
     });
     res.end();
 }
-
+var redirectSetCookie = (res, webtaskContext, decoded,success, state) => {
+    var token = jwt.sign({
+         status: success ? 'ok' : 'fail',
+         jti: decoded.jti
+    },
+        new Buffer(webtaskContext.secrets.token_secret, 'base64'), {
+            subject: decoded.sub,
+            expiresIn: '2d',
+            audience: decoded.aud,
+            issuer: webtaskContext.secrets.auth0_domain
+            
+        });
+    console.log("before setting cookie", decoded.jti);
+    console.log("Device remembered--> Setting cookie now" ,webtaskContext.headers.host, webtaskContext.storage.backchannel.webtaskName)
+    var key = getSha1Hash(decoded.sub.split('|')[1]);
+    res.cookie(key, encrypt(decoded.sub, webtaskContext.secrets.cookie_enc_key), { maxAge:       webtaskContext.secrets.DAYS_COOKIE_VALID_FOR * 24 * 60 * 60 * 1000, httpOnly: true, secure: true });
+    console.log("Device remembered--> Done Setting cookie now");
+    let APP_ID = 'https://' + webtaskContext.headers.host;
+    let WTURL = APP_ID + '/' + webtaskContext.storage.backchannel.webtaskName; 
+    console.log("APP id URL " + WTURL);
+    res.writeHead(301, { Location: WTURL + '/continue' + '?token=' + token + '&state=' + state });
+    res.end();
+}
 function sendCodeAndShowPasswordlessSecondStep(res, webtaskContext, decoded_token, state) {
     request({
         method: 'POST',
@@ -226,6 +276,52 @@ function passwordlessSecondStepForm() {
       </body>
     </html>
     */
+}
+var getSha1Hash = (text) => {
+    shasum.update(text);
+    return shasum.digest('hex');
+}
+var decrypt = (text, password) => {
+    let ENCRYPTION_KEY = crypto.createHash('md5').update(password, 'utf-8').digest('hex');
+    let textParts = text.split(':');
+    let iv = new Buffer(textParts.shift(), 'hex');
+    let encryptedText = new Buffer(textParts.join(':'), 'hex');
+    let decipher = crypto.createDecipheriv('aes-256-cbc', new Buffer(ENCRYPTION_KEY), iv);
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString();
+}
+
+var isCookieStillGood = (encCookie, req, decoded) => {
+    console.log("Here:");
+    console.log(decoded.sub);
+    var decCookie = decrypt(encCookie, req.webtaskContext.secrets.cookie_enc_key);
+    if (decCookie === decoded.sub) return true;
+    return false;
+}
+var sendToErrorPage = (req, res, error) => {
+    var errorStr = JSON.stringify(error);
+
+    if (error.name === "TokenExpiredError") errorStr = "This took too long. Please login and try again. Click <a href";
+    if (error.name === "JsonWebTokenError") errorStr = "Invalid Attempt to verify. Please login and try again.";
+
+    res.writeHead(301, {
+        Location: 'https://' + req.header('host') + '/error?error=' + errorStr + '&state=' + req.query.state
+    });
+    res.end();
+}
+
+var encrypt = (text, password) => {
+    let ENCRYPTION_KEY = crypto.createHash('md5').update(password, 'utf-8').digest('hex');
+    //const ENCRYPTION_KEY = key;
+    const IV_LENGTH = 16; // For AES, this is always 16
+    let iv = crypto.randomBytes(IV_LENGTH);
+    let cipher = crypto.createCipheriv('aes-256-cbc', new Buffer(ENCRYPTION_KEY), iv);
+    let encrypted = cipher.update(text);
+
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    return iv.toString('hex') + ':' + encrypted.toString('hex');
+
 }
 
 var getUserById = (webtaskContext, userid, cb) => {
