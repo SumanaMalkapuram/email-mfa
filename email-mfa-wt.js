@@ -24,6 +24,7 @@ function hereDoc(f) {
 app.get('/', function(req, res) {
     var token = req.query.token;
     var state = req.query.state;
+    console.log("initial state in webtask" + state);
     
     jwt.verify(token, new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), function(err, decoded) {
         if (err) {
@@ -32,8 +33,9 @@ app.get('/', function(req, res) {
         }
         console.log("decoded jti", decoded.jti);
         var jti = decoded.jti;
+        console.log(decoded.sub.split('|')[1], "decoded subject");
         var key = getSha1Hash(decoded.sub.split('|')[1]);
-        console.log(req.cookies[key]);
+            console.log(req.cookies[key]);
         if (req.cookies[key] && isCookieStillGood(req.cookies[key], req, decoded)) {
                 decoded.status = "ok";
                 redirectBack(res, req.webtaskContext, decoded, decoded.status, req.query.state);
@@ -140,8 +142,13 @@ app.post('/', function(req, res) {
             }
         }).then(function(response) {
             console.log("I am here", response.statusCode);
+            if(response.statusCode === 200)
+            {
             redirectSetCookie(res,req.webtaskContext, decoded, response.statusCode === 200, state );
-            //redirectBack(res, req.webtaskContext, decoded, response[0].statusCode === 200, state);
+            }
+            else{
+            redirectBack(res, req.webtaskContext, decoded, response.statusCode === 200, state);
+            }
         }).catch(function(e) {
                         console.log(e);
 
@@ -152,9 +159,9 @@ app.post('/', function(req, res) {
 });
 
 function redirectBack(res, webtaskContext, decoded, success, state) {
-  console.log("ha ha");
+  console.log("ha ha", success);
     var token = jwt.sign({
-            status: success ,
+            status: success ? 'ok' : 'fail',
             jti: decoded.jti
         },
         new Buffer(webtaskContext.secrets.token_secret, 'base64'), {
@@ -165,6 +172,7 @@ function redirectBack(res, webtaskContext, decoded, success, state) {
             
         });
   console.log("in redirect back", decoded.jti);
+  console.log("redirecting with state" + state);
     res.writeHead(301, {
         Location: 'https://' + webtaskContext.secrets.auth0_domain + '/continue' + '?id_token=' + token + '&state=' + state
     });
