@@ -6,9 +6,8 @@ var Bluebird = require('bluebird');
 var request = Bluebird.promisify(require('request'));
 var tools = require('auth0-extension-tools');
 var cookieParser =  require( 'cookie-parser');
-   var crypto = require('crypto')
-        , shasum = crypto.createHash('sha1');
-
+   var crypto = require('crypto');
+       
 
 var app = Express();
 app.use(bodyParser.urlencoded({
@@ -286,6 +285,7 @@ function passwordlessSecondStepForm() {
     */
 }
 var getSha1Hash = (text) => {
+    var shasum = crypto.createHash('sha256');
     shasum.update(text);
     return shasum.digest('hex');
 }
