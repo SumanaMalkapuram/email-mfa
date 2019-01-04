@@ -6,8 +6,10 @@ var Bluebird = require('bluebird');
 var request = Bluebird.promisify(require('request'));
 var tools = require('auth0-extension-tools');
 var cookieParser =  require( 'cookie-parser');
+const util = require('util');
    var crypto = require('crypto');
-       
+        
+
 
 var app = Express();
 app.use(bodyParser.urlencoded({
@@ -23,6 +25,7 @@ function hereDoc(f) {
 app.get('/', function(req, res) {
     var token = req.query.token;
     var state = req.query.state;
+    
     console.log("initial state in webtask" + state);
     
     jwt.verify(token, new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), function(err, decoded) {
@@ -32,6 +35,7 @@ app.get('/', function(req, res) {
         }
         console.log("decoded jti", decoded.jti);
         var jti = decoded.jti;
+        var retries = decoded.retries;
         console.log(decoded.sub.split('|')[1], "decoded subject");
         var key = getSha1Hash(decoded.sub.split('|')[1]);
             console.log(req.cookies[key]);
@@ -74,7 +78,8 @@ app.get('/', function(req, res) {
                                     subject: decoded.sub,
                                     expiresIn: 600,
                                     audience: decoded.aud,
-                                    issuer: 'urn:auth0:email:mfa'
+                                    issuer: 'urn:auth0:email:mfa',
+                                    retries: retries
                                 });
                             decoded.token = newToken;
                             decoded.email_identity = email_connections[0];
@@ -93,7 +98,8 @@ app.get('/', function(req, res) {
                             expiresIn: 600,
                             audience: decoded.aud,
                             issuer: 'urn:auth0:email:mfa',
-                            jti: jti
+                            jti: jti,
+                            retries: retries
                         });
                     console.log(newToken);
                     decoded.token = newToken;
@@ -119,13 +125,34 @@ app.get('/continue', (req, res) => {
     });
 });
 
+app.get('/failure', (req, res) => {
+    console.log(req.query.id_token , "in failure");
+    jwt.verify(req.query.id_token, new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), (err, decoded) => {
+        console.log("decoded in failure", decoded);
+        decoded.token = req.query.id_token;
+        if (decoded.retries <= 3){
+                    
+            sendCodeAndShowPasswordlessSecondStep(res, req.webtaskContext, decoded, req.query.state);
+        }
+        else{
+            sendToErrorPage(req, res, "Failed 5 attemtps")
+        }
+
+        
+    });
+});
+
 
 app.post('/', function(req, res) {
     var token = req.body.token;
     var state = req.body.state;
     
-    console.log(req.body);
+    console.log("in post",JSON.stringify(req.body.token));
+    //console.log(`post/${util.inspect(req.body.token,false,null)}`);
     jwt.verify(token, new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), function(err, decoded) {
+        var _decoded = decoded;
+        var retries = _decoded.retries || 0;
+        console.log("in passwordless verify my retries" + retries);
         if (err) {
             res.end('error on callback token verification');
             return;
@@ -136,21 +163,44 @@ app.post('/', function(req, res) {
             url: 'https://' + req.webtaskContext.secrets.auth0_domain + '/passwordless/verify',
             json: {
                 connection: 'email',
-                email: decoded.email_identity.profileData.email,
+                email: _decoded.email_identity.profileData.email,
                 verification_code: req.body.code
             }
         }).then(function(response) {
-            console.log("I am here", response.statusCode);
+                console.log("I am here", response.statusCode);
             if(response.statusCode === 200)
             {
-            redirectSetCookie(res,req.webtaskContext, decoded, response.statusCode === 200, state );
+                redirectSetCookie(res,req.webtaskContext, _decoded, response.statusCode === 200, state );
             }
             else{
-            redirectBack(res, req.webtaskContext, decoded, response.statusCode === 200, state);
+                //var success = response.statusCode === 200
+                console.log("in else retries", state);
+                var newTokenPayload = {};
+                newTokenPayload.email_identity = _decoded.email_identity;
+                newTokenPayload.jti = _decoded.jti;
+                newTokenPayload.retries = retries + 1;
+                var newToken = jwt.sign(
+                    newTokenPayload,
+                    new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), {
+                        subject: _decoded.sub,
+                        expiresIn: 600,
+                        audience: _decoded.aud,
+                        issuer: 'urn:auth0:email:mfa'
+                        
+                    });
+                _decoded.token = newToken;
+                //decoded.email_identity = decoded.email_identity;
+                //sendCodeAndShowPasswordlessSecondStep(res, req.webtaskContext, decoded, state);
+                let APP_ID = 'https://' + req.webtaskContext.headers.host;
+                let WTURL = APP_ID + '/' + req.webtaskContext.storage.backchannel.webtaskName; 
+                console.log("APP id URL " + WTURL);
+                res.writeHead(301, {
+                    Location: WTURL + '/failure' + '?id_token=' + newToken + '&state=' + state
+                });
+                res.end();
             }
         }).catch(function(e) {
-                        console.log(e);
-
+            console.log(e);
             console.log('ERROR VERIFYING', e);
             //A client error like 400 Bad Request happened
         });
@@ -201,6 +251,9 @@ var redirectSetCookie = (res, webtaskContext, decoded,success, state) => {
     res.end();
 }
 function sendCodeAndShowPasswordlessSecondStep(res, webtaskContext, decoded_token, state) {
+    
+   // var mail = decoded_token.email_identity ? decoded_token.email_identity.profileData.email : decoded_token.email;
+    
     request({
         method: 'POST',
         url: "https://" + webtaskContext.secrets.auth0_domain + "/passwordless/start",
@@ -222,7 +275,9 @@ function showPasswordlessSecondStep(res, webtaskContext, decoded_token, state) {
     res.writeHead(200, {
         'Content-Type': 'text/html'
     });
-
+    //var mail = decoded_token.email_identity ? decoded_token.email_identity.profileData.email : decoded_token.email;
+    //var token = decoded_token.token ? decoded_token.token : decoded_token;
+    console.log("in show passwordless second step",decoded_token.email_identity.profileData.email, decoded_token);
     res.end(require('ejs').render(hereDoc(passwordlessSecondStepForm), {
         token: decoded_token.token,
         email: decoded_token.email_identity.profileData.email,
