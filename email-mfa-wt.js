@@ -130,7 +130,7 @@ app.get('/failure', (req, res) => {
     jwt.verify(req.query.id_token, new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), (err, decoded) => {
         console.log("decoded in failure", decoded);
         decoded.token = req.query.id_token;
-        if (decoded.retries <= 3){
+        if (decoded.retries !== 3){
                     
             sendCodeAndShowPasswordlessSecondStep(res, req.webtaskContext, decoded, req.query.state);
         }
@@ -150,8 +150,7 @@ app.post('/', function(req, res) {
     console.log("in post",JSON.stringify(req.body.token));
     //console.log(`post/${util.inspect(req.body.token,false,null)}`);
     jwt.verify(token, new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), function(err, decoded) {
-        var _decoded = decoded;
-        var retries = _decoded.retries || 0;
+        var retries = decoded.retries;
         console.log("in passwordless verify my retries" + retries);
         if (err) {
             res.end('error on callback token verification');
@@ -163,44 +162,48 @@ app.post('/', function(req, res) {
             url: 'https://' + req.webtaskContext.secrets.auth0_domain + '/passwordless/verify',
             json: {
                 connection: 'email',
-                email: _decoded.email_identity.profileData.email,
+                email: decoded.email_identity.profileData.email,
                 verification_code: req.body.code
             }
         }).then(function(response) {
-                console.log("I am here", response.statusCode);
+            console.log("I am here", response.statusCode);
             if(response.statusCode === 200)
             {
-                redirectSetCookie(res,req.webtaskContext, _decoded, response.statusCode === 200, state );
+            redirectSetCookie(res,req.webtaskContext, decoded, response.statusCode === 200, state );
             }
             else{
                 //var success = response.statusCode === 200
                 console.log("in else retries", state);
                 var newTokenPayload = {};
-                newTokenPayload.email_identity = _decoded.email_identity;
-                newTokenPayload.jti = _decoded.jti;
-                newTokenPayload.retries = retries + 1;
-                var newToken = jwt.sign(
-                    newTokenPayload,
-                    new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), {
-                        subject: _decoded.sub,
-                        expiresIn: 600,
-                        audience: _decoded.aud,
-                        issuer: 'urn:auth0:email:mfa'
-                        
-                    });
-                _decoded.token = newToken;
-                //decoded.email_identity = decoded.email_identity;
-                //sendCodeAndShowPasswordlessSecondStep(res, req.webtaskContext, decoded, state);
-                let APP_ID = 'https://' + req.webtaskContext.headers.host;
-                let WTURL = APP_ID + '/' + req.webtaskContext.storage.backchannel.webtaskName; 
-                console.log("APP id URL " + WTURL);
-                res.writeHead(301, {
-                    Location: WTURL + '/failure' + '?id_token=' + newToken + '&state=' + state
-                });
-                res.end();
+                            newTokenPayload.email_identity = decoded.email_identity;
+                            newTokenPayload.jti = decoded.jti;
+                            newTokenPayload.retries = retries + 1;
+                            var newToken = jwt.sign(
+                                newTokenPayload,
+                                new Buffer(req.webtaskContext.secrets.token_secret, 'base64'), {
+                                    subject: decoded.sub,
+                                    expiresIn: 600,
+                                    audience: decoded.aud,
+                                    issuer: 'urn:auth0:email:mfa'
+                                    
+                                });
+                            decoded.token = newToken;
+                            //decoded.email_identity = decoded.email_identity;
+                            //sendCodeAndShowPasswordlessSecondStep(res, req.webtaskContext, decoded, state);
+                            let APP_ID = 'https://' + req.webtaskContext.headers.host;
+                            let WTURL = APP_ID + '/' + req.webtaskContext.storage.backchannel.webtaskName; 
+                            console.log("APP id URL " + WTURL);
+       res.writeHead(301, {
+        Location: WTURL + '/failure' + '?id_token=' + newToken + '&state=' + state
+    });
+    res.end();
+                //decoded.retries = retries + 1;
+                
+                
             }
         }).catch(function(e) {
-            console.log(e);
+                        console.log(e);
+
             console.log('ERROR VERIFYING', e);
             //A client error like 400 Bad Request happened
         });
